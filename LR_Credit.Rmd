@@ -1,0 +1,736 @@
+---
+title: "Logistic Regression to Predict Likelihood of Loan Repayment"
+author: "Andrew vanderWilden"
+date: "October 29, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo = FALSE, include = FALSE}
+library(tidyverse)
+library(MASS)
+```
+
+
+```{r load-data and transformations, echo = FALSE}
+df <- read.table("credit-data-train.txt",
+                 header = TRUE)
+
+df$OUTPAY = df$DOUTM + df$DOUTL + df$DOUTHP + df$DOUTCC
+
+df$HHINC = df$SINC + df$DAINC
+
+df$AGE <- 2000 - (1900 + df$DOB)
+
+idx.AGE <- which(df$AGE == 1)
+
+df$AGE[idx.AGE] <- 0
+
+df$AGE_UNKN <- rep(0, length(df$AGE))
+df$AGE_UNKN[idx.AGE] <- 1
+
+idx.HHINC <- which(df$HHINC == 0)
+df$HHINC_UNKN <- rep(0, length(df$HHINC))
+df$HHINC_UNKN[idx.HHINC] <- 1
+
+df$emp.stat <- fct_collapse(df$AES, "Other" = c("N", "Z"))
+df$emp.stat2<- fct_collapse(df$AES, "Other" =c("M","N","U","Z"))
+
+df$DISP <- df$HHINC - (12 * df$OUTPAY)
+df$DISP.scl = df$DISP/1000
+
+set.seed(425837)
+df$fold <- sample(c(rep(0, 90), rep(1, 90), rep(2, 90),
+                      rep(3, 90), rep(4, 90), rep(5, 90),
+                      rep(6, 90), rep(7, 90), rep(8, 90), rep(9, 90)),
+                    nrow(df),
+                    replace = FALSE)
+
+
+fmod = glm(formula = BAD ~ AGE + AGE_UNKN + DISP.scl + HHINC_UNKN + emp.stat + PHON,
+          data = df, family = binomial(link = "logit"))
+
+mod2 = glm(formula = BAD ~ AGE + AGE_UNKN + DISP + HHINC_UNKN + emp.stat2 + PHON,
+          data = df, family = binomial(link = "logit"))
+
+mod3 = glm(formula = BAD ~ HHINC + AGE + AGE_UNKN + OUTPAY + PHON + emp.stat, data = df,
+           family = binomial(link = "logit"))
+
+mod4 = glm(formula = BAD ~ HHINC + AGE + AGE_UNKN + OUTPAY + PHON + emp.stat2, data = df,
+           family = binomial(link = "logit"))
+
+```
+
+```{r, echo=FALSE}
+set.seed(162539)
+
+df$loan = rep(0,length(df$BAD))
+df$recoup = rep(0,length(df$BAD))
+
+
+m <- 5000
+s <- 1000
+location <- log(m^2 / sqrt(s^2 + m^2))
+shape <- sqrt(log(1 + (s^2 / m^2)))
+
+loan = rlnorm(n=900, location, shape)
+df$loan = sample(loan, replace = FALSE)
+
+idx.BAD = which(df$BAD == 1)
+set.seed(826219)
+repay_prob = rbeta(240,.6,.4)
+
+df$recoup[idx.BAD] = sample(repay_prob, replace = FALSE)
+
+df$prof_loss = rep(0, length(df$BAD))
+
+
+```
+
+```{r,echo = FALSE}
+
+result = data.frame(Threshold = seq(.15,.25,0.01), R1 = rep(0,11),R2 = rep(0,11),
+                    R3 = rep(0,11), R4 = rep(0,11), R5 = rep(0,11), R6 = rep(0,11),
+                    R7 = rep(0,11), R8 = rep(0,11),R9 = rep(0,11), R10 = rep(0,11),
+                    Mean = rep(0,11))
+```
+
+```{r, echo = FALSE, include = FALSE}
+thresholds <- seq(0.15, 0.25, by = 0.01)
+p <- predict(fmod, type = "response")
+
+df$loan = rep(0,length(df$BAD))
+loan = rlnorm(n=900, location, shape)
+df$loan = sample(loan, replace = FALSE)
+
+for(i in 1:10){
+  y = 1
+
+  for(thr in thresholds){
+    set.seed(17*i)
+  
+    df$recoup = rep(0,length(df$BAD))
+
+    repay_prob = rbeta(240,.6,.4)
+    df$recoup[idx.BAD] = sample(repay_prob, replace = FALSE)
+  
+    df$PC = rep(0,length(df$BAD))
+    df$prof_loss = rep(0, length(df$BAD))
+    df$PC = ifelse(p > thr, 1, 0)
+
+    df$prof_loss = ifelse(df$PC == 1,
+                          0, ifelse(df$BAD == 1,
+                          (df$loan - (df$loan * df$recoup)) * (-1),
+                          df$loan * 0.1))
+    result[y,(i+1)] = sum(df$prof_loss)
+    y = y+1
+  }
+  
+}
+result$Mean = rowMeans(result[,-1])
+profs = result[,c(1,12)]
+
+```
+
+# 1. Abstract
+
+This report uses data on customer financial and demographic information. In the report, a Logistic 
+Regression model is used to predict the credit worthiness of a customer. We found `AGE`, 
+`DISP` (Disposable Income), `PHON` (Presence of a Phone in the House), and `AES` (Applicant Employment 
+Status) to be significant predictors of credit worthiness. Additionally we found using a threshold of 18%
+to decide if a customer is a bad credit risk returned the highest net profits for the bank.
+
+
+
+# 2. Introduction
+
+#### Orientation Material
+Loan companies offer loans to customers in need of money with the expectation the customer will be able
+to pay back the balance of the loan plus interest over a specified term length. A customer that defaults 
+on a loan can be extremely expensive as profits from customers who successfully pay the balance of their
+loan only account for fractions of the total amount of an unrecoverable loan. Put another way, it is
+paramount to determine the credit worthiness of potential customers before offering a loan.
+
+This report attempts to evaluate credit worthiness of customers using data from the book
+*Credit Scoring and its Applications* by Lyn C. Thomas, David B. Edelman, and Jonathan N. Crook.
+The data is estimated to have been collected in the year 2000.
+
+The data includes information about customers' demographic traits, income, and outgoing expenses.
+
+#### Key Aspects
+This report attempts to fit a model using Logistic Regression to predict if a customer will fail to repay
+a loan. The model returns the likelihood of a customer defaulting on a loan which is then used to
+classify the customer as either a good or bad credit risk.
+
+#### Plan for the Rest of the Report
+The outline for the remainder of the report is as follows. In section 3, we present the most important
+characteristics of the data and the relationships between predictor variables and credit worthiness.
+In section 4, the model selection process and the following interpretation will be discussed. Concluding
+remarks can be found in section 5 with details to follow in the Appendix.
+
+# 3. Data Characteristics 
+The data are cross-sectional and describe credit information for `r dim(df)[1]` customers
+at a non-specified time. The data includes information on the following `r dim(df)[2]` variables:
+
+| Item | Variable      | Definition                                                            |
+|-----:|:--------------|:----------------------------------------------------------------------|
+|  1   | DOB           | Year of birth                                                         |
+|  2   | NKID          | Number of Children                                                    |
+|  3   | DEP           | Number of Other Dependents                                            |
+|  4   | PHON          | Is there a Home Phone                                                 |
+|  5   | SINC          | Spouse's Income                                                       |
+|  6   | AES           | Applicant Employment Status                                           |
+|  7   | DAINC         | Applicant's Income                                                    |
+|  8   | RES           | Residential Status                                                    |
+|  9   | DHVAL         | Value of Home                                                         |
+| 10   | DMORT         | Mortgage Balance Outstanding                                          |
+| 11   | DOUTM         | Outgoing Payments on Mortgage or Rent                                 |
+| 12   | DOUTL         | Outgoing Payments on Loans                                            |
+| 13   | DOUTHP        | Outgoing Payments on Hire Purchase                                    |
+| 14   | DOUTCC        | Outgoing Payments on Credit Cards                                     |
+| 15   | BAD           | Good/Bad Credit Indicator                                             |
+
+
+See Appendix Section A for the coding of values for the categorical variable `AES`.
+
+The variable of interest is the variable `BAD`. A value of 1 indicates the customer did not repay the
+loan while a value of 0 indicates the customer successfully repaid the loan. Of the `r dim(df)[1]`
+customers in the data set, `r length(which(df[,"BAD"] == 1))`, or `r round(mean(df$BAD)*100,2)`%
+failed to pay the balance of their loan.
+
+The variable `DOB` was used to create a new variable `AGE`.  `AGE` is calculated by subtracting 1900 + 
+`DOB` from the year 2000.
+
+The below table shows summary statistics for all numerical variables in the data set.
+
+```{r, echo = FALSE}
+
+
+tbl <- rbind(c(mean = round(mean(df$AGE),2), median = median(df$AGE),
+               sd = round(sd(df$AGE),2),
+               min = min(df$AGE), max = max(df$AGE)),
+             c(mean = round(mean(df$NKID),2), median = median(df$NKID),
+               sd = round(sd(df$NKID),2),
+               min = min(df$NKID), max = max(df$NKID)),
+             c(mean = round(mean(df$DEP),2), median = median(df$DEP),
+               sd = round(sd(df$DEP),2),
+               min = min(df$DEP), max = max(df$DEP)),
+             c(mean = round(mean(df$SINC),2), median = median(df$SINC),
+               sd = round(sd(df$SINC),2),
+               min = min(df$SINC), max = max(df$SINC)),
+             c(mean = round(mean(df$DAINC),2), median = median(df$DAINC),
+               sd = round(sd(df$DAINC),2),
+               min = min(df$DAINC), max = max(df$DAINC)),
+             c(mean = round(mean(df$DHVAL),2), median = median(df$DHVAL),
+               sd = round(sd(df$DHVAL),2),
+               min = min(df$DHVAL), max = max(df$DHVAL)),
+             c(mean = round(mean(df$DMORT),2), median = median(df$DMORT),
+               sd = round(sd(df$DMORT),2),
+               min = min(df$DMORT), max = max(df$DMORT)),
+             c(mean = round(mean(df$DOUTM),2), median = median(df$DOUTM),
+               sd = round(sd(df$DOUTM),2),
+               min = min(df$DOUTM), max = max(df$DOUTM)),
+             c(mean = round(mean(df$DOUTL),2), median = median(df$DOUTL),
+               sd = round(sd(df$DOUTL),2),
+               min = min(df$DOUTL), max = max(df$DOUTL)),
+             c(mean = round(mean(df$DOUTHP),2), median = median(df$DOUTHP),
+               sd = round(sd(df$DOUTHP),2),
+               min = min(df$DOUTHP), max = max(df$DOUTHP)),
+             c(mean = round(mean(df$DOUTCC),2), median = median(df$DOUTCC),
+               sd = round(sd(df$DOUTCC),2),
+               min = min(df$DOUTCC), max = max(df$DOUTCC))
+             )
+             
+             
+             
+dimnames(tbl) <- list(c("AGE", "NKID", "DEP", "SINC", "DAINC", "DHVAL",
+                        "DMORT", "DOUTM", "DOUTL",
+                        "DOUTHP", "DOUTCC"),
+                      c("Mean", "Median", "Standard Deviation", "Minimum", "Maximum"))
+tbl
+
+
+```
+
+
+Because the variable `DOB` was coded using the value 99 for year of birth unknown, the variable `AGE` is
+smaller than the true mean because there are `r length(which(df$DOB == 99))` observations that appear
+to have an age of 1.
+
+It is also worth noting that the documentation accompanying the data set did not indicate what the time 
+scales of the income variables or outgoing payment variables are.  Based on the summary statistics it
+appears as though all outgoing payments appear to be on a monthly scale whereas the income variables 
+appear to be on a yearly scale.  For the purposes of the rest of this report, they will be treated as
+such.
+
+
+Individually the variable for outgoing monthly payments may not be useful for prediction. With the
+exception of the variable `DOUTM`, more than half of all customers have no payments in each individual
+category.  It likely makes more sense to combine all of these payments into one new variable called 
+`OUTPAY`.
+
+We can see the summary statistics for the variable `OUTPAY` below:
+
+```{r, echo = FALSE}
+
+out_sum = c("Mean" = round(mean(df$OUTPAY),2), "Median" = median(df$OUTPAY),
+               "Std. Dev" = round(sd(df$OUTPAY),2),
+               "Min" = min(df$OUTPAY), "Max" = max(df$OUTPAY))
+
+out_sum
+
+```
+
+Even after this transformation, there are still `r length(which(df[,"OUTPAY"] == 0))` customers that 
+apparently have no monthly expenses at all which suggests an error in data collection or
+at the least it is extremely anomalous.
+
+
+Additionally, it would make sense to consider the overall income level of an entire household, rather
+than individually. We created a new variable called `HHINC` by combining `SINC` and `DAINC`.
+We can see the summary statistics for the variable `HHINC` below:
+
+```{r, echo = FALSE}
+hhinc_sum = c("Mean" = round(mean(df$HHINC),2), "Median" = median(df$HHINC),
+               "Std. Dev" = round(sd(df$HHINC),2),
+               "Min" = min(df$HHINC), "Max" = max(df$HHINC))
+
+hhinc_sum
+
+x = subset(df, df[,"HHINC"] == 0)
+work_no_inc = length(which(x[,"AES"] == "E" | x[,"AES"] == "B" | x[,"AES"] == "P" | x[,"AES"] == "M"))
+```
+
+Again, it is noteworthy that `r length(which(df[,"HHINC"] == 0))` customers appear to have no household
+income.  Of this group, `r length(which(x[,"AES"] == "R"))` appear to be retired and may be relying on
+the value of owned assets to be able to repay a loan. `r length(which(x[,"AES"] == "T"))` potential
+customers are students with no income. We can see from the below summary information that as one would
+expect, people who have no household income are likely to have difficulty repaying a loan:
+
+```{r, echo = FALSE}
+no_inc = c("Total" = length(x$BAD),
+           "Good" = length(which(x$BAD == 0)),
+           "Bad" = length(which(x$BAD == 1)))
+
+no_inc
+```
+
+
+Strangely, `r work_no_inc` people appear to be working jobs in the military, private sector, public 
+sector, or are self-employed but seemingly are doing so for free.  This suggests an error in data
+collection or coding.
+
+To gain a better understanding of a customer's ability to repay a loan, calculating a household's
+disposable income gives an estimate of available funds a customer will have after accounting for all 
+outgoing expenses.  We created the variable `DISP` to represent this value.  It was calculated by
+multiplying the total monthly outgoing payments by 12 to account for the monthly time scale, and 
+subtracting that value from the total household income. We can see the summary statistics below:
+
+```{r,echo = FALSE}
+disp_sum = c("Mean" = round(mean(df$DISP),2), "Median" = median(df$DISP),
+               "Std. Dev" = round(sd(df$DISP),2),
+               "Min" = min(df$DISP), "Max" = max(df$DISP))
+
+disp_sum
+```
+
+The below plot shows the relationship between household income and credit status.
+
+```{r, echo = FALSE}
+
+plt01 <- ggplot(df) +
+  aes(x = HHINC, y = BAD) +
+  geom_jitter(height = 0.02, shape = 1) +
+  geom_smooth(se = FALSE) +
+  labs(x = "Household Disposable Income",
+       y = "Good/Bad Credit")
+print(plt01)
+
+```
+
+The blue line shows the general relationship between the two variables.  As Household Disposable Income 
+increases, the less likely the customer is to be a bad credit risk. This indicates the variable `DISP` is
+likely an important predictor of credit worthiness.
+
+The variable `AGE` appears to be a significant predictor of credit worthiness as well. As we can see from
+the trend line on the plot below, older people are associated with greater credit risk. This is likely
+because they do not have a reliable stream of income.
+
+```{r,echo=FALSE}
+no_outs = subset(df,df$DOB != 99)
+
+plt02 <- ggplot(no_outs) +
+  aes(x = AGE, y = BAD) +
+  geom_jitter(height = 0.02, shape = 1) +
+  geom_smooth(se = FALSE) +
+  labs(x = "AGE",
+       y = "Good/Bad Credit")
+print(plt02)
+
+```
+
+
+The variable `PHON` appears to be a significant predictor as well:
+```{r,echo = FALSE}
+b = tapply(df$BAD, df$PHON, mean)
+
+phone = c("No Phone" = b[1],
+          "Phone" = b[2])
+phone
+```
+
+Having a phone in the house appears to be significantly correlated with credit worthiness.
+
+
+The variable `AES` is likely also a useful predictor of credit worthiness. The below table shows the
+breakdown of good and bad credit by employment status as well as the total percentage for each group:
+```{r, echo = FALSE}
+tbl_aes <- rbind(tapply(df$BAD, df$AES, sum),
+             tapply(1-df$BAD, df$AES, sum),
+             tapply(df$BAD, df$AES, mean))
+dimnames(tbl_aes)[[1]] <- c("BAD", "GOOD", "%BAD")
+tbl_aes
+```
+
+We can observe there are clear differences in credit worthiness among the categories with a significant
+number of observations. For purposes of model building, the categories `Z` and `N`, which correspond to 
+no response or other were pooled together. Consideration was given to also adding the category `U`
+however we felt knowing a potential customer is unemployed is an important piece of information 
+
+# 4. Model Selection and Interpretation
+
+Based on the above Data Characteristics section, it has been established there are clear correlations and
+patterns between the credit indicator, and many of the predictor variables.
+
+In this section we summarize these relationships using regression modeling. We also explain the ways in
+which we manipulated the data during our selection process.
+
+Based on our investigation of the data, we recommend a Logistic regression model using a Logit link
+function to estimate credit worthiness. The variables used to create the regression model are: `AGE`, 
+`DISP` (Disposable Income), `PHON` (Presence of a Phone in the House), and `AES` (Applicant Employment 
+Status). The variable `AES` was transformed into a derived grouped variable. The variable `DISP` was 
+scaled so an increase of 1 indicates an increase of $1000 of disposable income.
+
+When using the model to make classifications of new customers, we recommend using a probability
+threshold of 18% to classify someone as a bad credit risk.
+
+Additionally two indicator variables were used to account for anomalies in the data described in
+the above section. The variable `AGE_UNKN` has a value of 1 for any observation which reported a `DOB` of
+99 and a 0 for all other observations.  The variable `HHINC_UNKN` has a value of 1 for any observation
+that had no household income and a value of 0 for all other observations.
+
+The model was built using all `r length(df$BAD)` observations from the data set and tested using
+K-fold cross validation with K equal to 10. 
+
+The model was fit using an iteratively weighted least squares algorithm and the following table shows the
+value of the estimated coefficients and their standard errors.
+
+```{r,echo=FALSE}
+sfmod <- summary(fmod)
+
+round(sfmod$coefficients[,1:2],3)
+```
+
+The category `B`(public sector) is taken to be the base level for the regression.
+
+The coefficient of the variable `DISP.scl` is equal to `r round(coef(fmod)[4], 3)`.  We can interpret
+this to mean an increase of $1,000 in disposable income decreases the odds of being classified as a bad
+credit risk by a multiplicative factor of $\exp(`r round(coef(fmod)[4], 3)`) = `r round(exp(coef(fmod)[4]),3)`$.
+
+As a simple example, if the previous odds were equal to 0.5, $\text{new odds} = 0.5 \times 0.984 = 0.492$
+
+The previous probability was:
+$$
+  \pi = \frac{0.5}{1.5} = 0.3333
+$$
+
+The new probability would be:
+$$
+  \pi = \frac{0.492}{1.492} = 0.3297
+$$
+
+This is an decrease of roughly 0.36%.
+
+
+
+## Discussion of Model and Selection Criteria for Goodness of Fit
+
+The residuals for our recommended model did not show significant patterns. The following graph shows the
+deviance residuals against the predicted probabilities.
+
+```{r,echo=FALSE}
+prbs <- predict(fmod, type = "response")
+r <- resid(fmod, type = "deviance")
+ggplot(data = data.frame(x = prbs, y = r)) +
+  aes(x = x, y = y) +
+  geom_jitter(height = 0.02, width = 0.02) +
+  geom_smooth() +
+labs(x = "Predicted Probabilities", y = "Deviance Residuals")
+```
+
+This is a typical plot for logistic regression models. The blue line shows the overall estimate of the
+pattern of residuals as the predicted probability increases. The line is reasonably close to flat
+indicating no issues with the residuals. Towards the two ends of the graph the grey area widens to
+indicate the increasing uncertainty however this is to be expected as we have fewer observations with
+which to estimate the line.
+
+Typical in classification models, the criterion used to select the optimal model is a combination of 
+accuracy, sensitivity, specificity, and precision of classifiers. The below statistics show the summary
+values using a classifying threshold of 42% which maximized out accuracy.
+
+```{r, echo = FALSE}
+cm.metrics <- function(cm) {
+  acc <- sum(diag(cm))/sum(cm)
+  pre <- cm[1,1]/sum(cm[1,])
+  sen <- cm[1,1]/sum(cm[,1])
+  spe <- cm[2,2]/sum(cm[,2])
+  
+  ans <- c("Accuracy" = acc,
+           "Precision" = pre,
+           "Sensitivity" = sen,
+           "Specificity" = spe)
+  return(ans)
+}
+```
+
+
+```{r,echo=FALSE,include=FALSE}
+PC <- ifelse(p > 0.42 , 1, 0)
+TC <- df$BAD
+cm <- table(factor(PC, levels = 1:0),
+              factor(TC, levels = 1:0))
+
+
+a = cm.metrics(cm)
+```
+
+
+```{r, echo = FALSE,include=FALSE}
+set.seed(549843)
+F <- matrix(NA, nrow = 10, ncol = 5) 
+dimnames(F)[[2]] <- c("fold", "accuracy", "precision", "sensitivity", "specificity")
+i <- 1
+for(fld in 0:9){
+  fit <- glm(BAD ~ AGE + AGE_UNKN + DISP.scl + HHINC_UNKN + emp.stat + PHON, 
+             data = df,
+             subset = fold != fld, # do not use one fold
+             family = binomial(link = "logit"))
+  
+  pd <- predict(fit,
+               newdata = subset(df, subset = fold == fld), 
+               type = "response")
+  PC <- ifelse(pd > 0.42, 1, 0)
+  TC <- df$BAD[df$fold == fld] 
+  cm <- table(factor(PC, levels = 1:0),
+              factor(TC, levels = 1:0))
+  F[i,] <- c(fld, cm.metrics(cm))
+  i <- i + 1
+}
+(fld.means <- apply(F, 2, mean)[2:5])
+```
+
+
+```{r, echo = FALSE}
+tbl <- rbind("Whole Sample" = a,
+      "Cross-Validated" = fld.means,
+      "Difference" = a - fld.means)
+dimnames(tbl)[[2]] <- c("Accuracy", "Precision", "Sensitivity", "Specificity")
+round(tbl,4)
+```
+
+
+We felt this was not the correct way to measure accuracy in this application and therefore chose to
+prioritize potential profit for the bank which will be detailed below.
+
+Another measure of accuracy used in logistic regression is the Hosmer Lemeshow statistic.  The smaller the
+statistic is, the better the goodness of fit.  The HL stat for our model and its associated p-value are
+shown below:
+
+```{r,echo=FALSE}
+HL <- function(a, e, g = 10) {
+  y <- a
+  yhat <- e
+  qq <- quantile(yhat, probs = seq(0, 1, 1/g))
+  cutyhat <- cut(yhat, breaks = qq, include.lowest = TRUE)
+  observed <- xtabs(cbind(y0 = 1 - y, y1 = y) ~ cutyhat)
+  expected <- xtabs(cbind(yhat0 = 1 - yhat, yhat1 = yhat) ~ cutyhat)
+  C.hat <- sum((observed - expected)^2/expected)
+  p.val <- 1 - pchisq(C.hat, g - 2)
+  ans <- c("HL Stat." = C.hat,
+           "P-Value" = p.val)
+  return(ans)
+}
+HL(df$BAD,p)
+```
+
+In the model-building process we were able to build models with lower HL statistics but they did not
+perform well when looking at classification rates or profit maximization.
+
+The primary criteria used to choose our model was a simulation of potential profits or losses a bank
+could expect using our classifier.
+
+Because the data did not come with any loan amounts we decided to randomly assign loan values using a
+log-normal distribution with a mean of $5,000 and a standard deviation of 1000. The below chart shows
+the distribution of loans to give a sense of the relative risk profile.
+```{r,echo=FALSE}
+truehist(loan)
+```
+
+
+Banks do not give out loans without collateral. To assume every misclassified bad credit risk would not 
+pay back any of the money is not a realistic situation.  To model the percentage of a loan that would be
+recoverable we decided to randomly assign values from a U-shaped beta distribution with a mean of 0.6. 
+The U-Shape tries to account for the few people who truly have no ability to repay the loan as well as
+partial collections by means of collateral or partial repayment. The distribution of probabilities can
+be seen below:
+```{r,echo=FALSE}
+truehist(repay_prob)
+```
+
+The simulation was performed assuming the bank makes a 10% profit on every loan that is repayed in full.
+In a real life example, loan amounts and repay probabilities would be tied to the very model we are
+building and therefore would perform at an even higher level.  The results of the simulation can be seen
+below.The profits reported are an average of 10 runs of the simulation, reassigning the recoverable
+amount of a loan to different loan amounts. The full simulation can be seen in Appendix section B.
+```{r,echo=FALSE}
+profs
+```
+
+Using a threshold value of 18% consistently resulted in the highest net profits for the bank. For our
+model, this resulted in a net profit of $35,690.91.  If we were to give out loans to every customer and
+were still able to make partial recoveries, the net loss for each threshold would be:
+```{r,echo=FALSE}
+for(i in 1:10){
+  y = 1
+
+  for(thr in thresholds){
+    set.seed(17*i)
+  
+
+    df$recoup = rep(0,length(df$BAD))
+
+    repay_prob = rbeta(240,.6,.4)
+    df$recoup[idx.BAD] = sample(repay_prob, replace = FALSE)
+  
+    df$PC = rep(0,length(df$BAD))
+    df$prof_loss = rep(0, length(df$BAD))
+
+    df$prof_loss = ifelse(df$PC == 1,
+                          0, ifelse(df$BAD == 1,
+                          (df$loan - (df$loan * df$recoup)) * (-1),
+                          df$loan * 0.1))
+    result[y,(i+1)] = sum(df$prof_loss)
+    y = y+1
+  }
+  
+}
+result$Mean = rowMeans(result[,-1])
+result[,c(1,12)]
+
+```
+
+Using the model resulted in a net difference of $173,790 for just these 900 customers.
+
+
+The model we used was able to outperform all other models we tested using the same simulation technique.
+
+
+# 5. Summary and Concluding Remarks
+In trying to predict credit worthiness of potential customers, we found the variables `AGE`, 
+`DISP` (Disposable Income), `PHON` (Presence of a Phone in the House), and `AES` (Applicant Employment 
+Status) to be significant predictors in our logistic regression model.  We found using a threshold of 18%
+to classify customers as good or bad credit risks resulted in the highest net profits. It is likely worth
+exploring if a different type of classification model would outperform a logistic regression model using
+techniques such as K-nearest-neighbors or Classification Trees.
+
+# Appendix
+
+### Section A
+| Item | Category      | Definition                                                            |
+|-----:|:--------------|:----------------------------------------------------------------------|
+|  1   | V          | Government                                                         |
+|  2   | W          | Housewife                                                 |
+|  3   | M           | Military                                            |
+|  4   | P          | Private Sector                                                |
+|  5   | B          | Public Sector                                                       |
+|  6   | R           | Retired                                           |
+|  7   | E         | Self-Employed                                                    |
+|  8   | T           | Student                                                    |
+|  9   | U         | Unemployed                                                         |
+| 10   | N         | Others                                          |
+| 11   | Z         | No Response                                 |
+
+
+### Section B
+```{r, echo = TRUE}
+thresholds <- seq(0.15, 0.25, by = 0.01)
+p <- predict(fmod, type = "response")
+
+df$loan = rep(0,length(df$BAD))
+loan = rlnorm(n=900, location, shape)
+df$loan = sample(loan, replace = FALSE)
+
+for(i in 1:10){
+  y = 1
+
+  for(thr in thresholds){
+    set.seed(17*i)
+  
+    df$recoup = rep(0,length(df$BAD))
+
+    repay_prob = rbeta(240,.6,.4)
+    df$recoup[idx.BAD] = sample(repay_prob, replace = FALSE)
+  
+    df$PC = rep(0,length(df$BAD))
+    df$prof_loss = rep(0, length(df$BAD))
+    df$PC = ifelse(p > thr, 1, 0)
+
+    df$prof_loss = ifelse(df$PC == 1,
+                          0, ifelse(df$BAD == 1,
+                          (df$loan - (df$loan * df$recoup)) * (-1),
+                          df$loan * 0.1))
+    result[y,(i+1)] = sum(df$prof_loss)
+    y = y+1
+  }
+  
+}
+result$Mean = rowMeans(result[,-1])
+profs = result[,c(1,12)]
+
+```
+
+# Score Function
+```{r}
+score <- function(newdata){
+  db <- newdata
+  
+  db$OUTPAY = db$DOUTM + db$DOUTL + db$DOUTHP + db$DOUTCC
+
+  db$HHINC = db$SINC + db$DAINC
+
+  db$AGE <- 2000 - (1900 + db$DOB)
+
+  idx.AGE <- which(db$AGE == 1)
+
+  db$AGE[idx.AGE] <- 0
+
+  db$AGE_UNKN <- rep(0, length(db$AGE))
+  db$AGE_UNKN[idx.AGE] <- 1
+
+  idx.HHINC <- which(db$HHINC == 0)
+  db$HHINC_UNKN <- rep(0, length(db$HHINC))
+  db$HHINC_UNKN[idx.HHINC] <- 1
+
+  db$emp.stat <- fct_collapse(db$AES, "Other" = c("N", "Z"))
+  db$emp.stat2<- fct_collapse(db$AES, "Other" =c("M","N","U","Z"))
+
+  db$DISP <- db$HHINC - (12 * db$OUTPAY)
+  db$DISP.scl = db$DISP/1000
+  
+  p <- predict(fmod, newdata = db, type = "response")
+  ans <- ifelse(p > 0.18, 1, 0)
+  return(ans)
+}

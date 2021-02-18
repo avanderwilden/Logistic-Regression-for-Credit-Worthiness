@@ -1,0 +1,45 @@
+Dictionary for Data set Public.xls		
+		
+Variable Name	Description	Codings
+		
+dob	Year of birth	If unknown the year will be 99
+nkid	Number of children	number
+dep	Number of other dependents	number
+phon	Is there a home phone	1 = yes, 0 = no
+sinc	Spouse's income	
+aes	Applicant's employment status	
+    V = Government
+		W = housewife
+		M = military 
+		P = private sector
+		B = public sector
+		R = retired
+		E = self employed
+		T = student
+		U = unemployed
+		N = others
+		Z  = no response
+		
+		
+dainc	Applicant's income	
+res	Residential status	
+    O = Owner
+		F = tenant furnished
+		U = Tenant Unfurnished
+		P = With parents
+		N = Other
+		Z = No response
+dhval	Value of Home	
+    0 = no response or not owner
+		000001 = zero value
+		blank = no response
+dmort	Mortgage balance outstanding	 
+    0 = no response or not owner
+		000001 = zero balance
+		blank = no response
+doutm	Outgoings on mortgage or rent	
+doutl	Outgoings on Loans	
+douthp	Outgoings on Hire Purchase	
+doutcc	Outgoings on credit cards	
+Bad	Good/bad indicator	1 = Bad
+				0 = Good
